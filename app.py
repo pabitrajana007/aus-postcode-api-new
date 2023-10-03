@@ -1,24 +1,13 @@
 from flask import Flask, request, jsonify
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
+import psycopg2
+import json
 import os
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
-
-# Create a SQLAlchemy engine
-db_name = os.getenv('DBNAME')
-db_user = os.getenv('USER')
-db_password = os.getenv('PASSWORD')
-db_host = os.getenv('HOST')
-
-engine = create_engine(f"postgresql://{db_user}:{db_password}@{db_host}/{db_name}")
-
-# Create a session
-Session = sessionmaker(bind=engine)
 
 @app.route('/', methods=['GET'])
 def display_form():
@@ -41,36 +30,51 @@ def scrape():
         if not postcode.isdigit():
             raise ValueError("Invalid postcode. Please enter a numeric value.")
 
-        # Create a session
-        session = Session()
+        db_name = os.getenv('DBNAME')
+        db_user = os.getenv('USER')
+        db_password = os.getenv('PASSWORD')
+        db_host = os.getenv('HOST')
 
-        # Use SQLAlchemy to execute the query
-        query = text("""
+        conn = psycopg2.connect(
+            dbname=db_name,
+            user=db_user,
+            password=db_password,
+            host=db_host
+        )
+
+        cur = conn.cursor()
+
+        query = """
         SELECT DISTINCT address_detail.postcode, locality.locality_name, state.state_name
         FROM address_detail
         JOIN locality ON address_detail.locality_pid = locality.locality_pid
         JOIN state ON locality.state_pid = state.state_pid
-        WHERE address_detail.postcode = :postcode
-        """)
+        WHERE address_detail.postcode = %(postcode)s;
+        """
 
-        result = session.execute(query, {"postcode": postcode})
+        cur.execute(query, {'postcode': postcode})
 
-        table_list = []
-        for row in result:
+        table_dict = {}
+        rows = cur.fetchall()
+
+        if not rows:
+            return jsonify({'message': 'No results found for the entered postcode.'}), 200
+
+        table_list = []  # Empty list to store dictionaries
+
+        for row in rows:
             keys = ['Postcode', 'Locality', 'State']
             values = row
             table_dict = dict(zip(keys, values))
             table_list.append(table_dict)
 
-        session.close()
-
-        if not table_list:
-            return jsonify({'message': 'No results found for the entered postcode.'}), 200
+        cur.close()
+        conn.close()
 
         # Return the JSON response
         return jsonify(table_list)
 
-    except (ValueError, KeyError, TypeError) as e:
+    except (psycopg2.Error, KeyError, TypeError, ValueError) as e:
         # Handle specific exceptions
         error_message = str(e)
         return jsonify({'error': error_message}), 500
