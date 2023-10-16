@@ -1,83 +1,98 @@
+# This codebase can search upto 5 postalcodes, and shows error for invalid postcodes as well !!
+
 from flask import Flask, request, jsonify
-import psycopg2
-import json
-import os
+from flask import render_template
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+import os
 
 # Load environment variables from .env file
 load_dotenv()
 
 app = Flask(__name__)
 
+# Create a SQLAlchemy engine
+db_name = os.getenv('DBNAME')
+db_user = os.getenv('USER')
+db_password = os.getenv('PASSWORD')
+db_host = os.getenv('HOST')
+
+engine = create_engine(f"postgresql://{db_user}:{db_password}@{db_host}/{db_name}")
+
+# Create a session
+Session = sessionmaker(bind=engine)
+
 @app.route('/', methods=['GET'])
 def display_form():
     # If it's a GET request, display the form
     return '''
     <form method="post">
-        <label for="postcode">Enter postcode:</label>
-        <input type="text" id="postcode" name="postcode" required>
+        <label for="postcodes">Enter postcodes (comma-separated):</label>
+        <input type="text" id="postcodes" name="postcodes" required>
         <input type="submit" value="Submit">
     </form>
     '''
 
+
 @app.route('/', methods=['POST'])
 def scrape():
     try:
-        # Get the postcode from the user input
-        postcode = request.form.get('postcode')
+        # Get the comma-separated postcodes from the user input
+        postcodes_input = request.form.get('postcodes')
 
-        # Check if the postcode is a number
-        if not postcode.isdigit():
-            raise ValueError("Invalid postcode. Please enter a numeric value.")
+        # Split the input on commas to extract individual postcodes
+        postcodes = postcodes_input.split(',')
 
-        db_name = os.getenv('DBNAME')
-        db_user = os.getenv('USER')
-        db_password = os.getenv('PASSWORD')
-        db_host = os.getenv('HOST')
+        # Create a session
+        session = Session()
 
-        conn = psycopg2.connect(
-            dbname=db_name,
-            user=db_user,
-            password=db_password,
-            host=db_host
-        )
+        response_data = {}
 
-        cur = conn.cursor()
+        for postcode in postcodes:
+            # Strip leading and trailing spaces from the postcode
+            postcode = postcode.strip()
 
-        query = """
-        SELECT DISTINCT address_detail.postcode, locality.locality_name, state.state_name
-        FROM address_detail
-        JOIN locality ON address_detail.locality_pid = locality.locality_pid
-        JOIN state ON locality.state_pid = state.state_pid
-        WHERE address_detail.postcode = %(postcode)s;
-        """
+            # Check if the postcode is a number having 4-digits
+            if not postcode.isdigit() or len(postcode) != 4:
+                error_message = f"Invalid postcode: {postcode}. Please enter a 4-digit numeric value."
+                response_data[postcode] = {'error': error_message}
+            else:
+                # Use SQLAlchemy to execute the query
+                query = text("""
+                SELECT *
+                FROM postcodeDB
+                WHERE postcode = :postcode
+                """)
 
-        cur.execute(query, {'postcode': postcode})
+                result = session.execute(query, {"postcode": postcode})
 
-        table_dict = {}
-        rows = cur.fetchall()
+                postcode_data = []
 
-        if not rows:
-            return jsonify({'message': 'No results found for the entered postcode.'}), 200
+                for row in result:
+                    keys = ['Postcode', 'Locality', 'State']
+                    values = row
+                    table_dict = dict(zip(keys, values))
+                    postcode_data.append(table_dict)
 
-        table_list = []  # Empty list to store dictionaries
+                if not postcode_data:
+                    error_message = f"404, Postcode {postcode} not found in the database"
+                    response_data[postcode] = {'error': error_message}
+                else:
+                    response_data[postcode] = postcode_data
 
-        for row in rows:
-            keys = ['Postcode', 'Locality', 'State']
-            values = row
-            table_dict = dict(zip(keys, values))
-            table_list.append(table_dict)
-
-        cur.close()
-        conn.close()
+        session.close()
 
         # Return the JSON response
-        return jsonify(table_list)
+        return jsonify(response_data)
 
-    except (psycopg2.Error, KeyError, TypeError, ValueError) as e:
+    except (ValueError, KeyError, TypeError) as e:
         # Handle specific exceptions
         error_message = str(e)
         return jsonify({'error': error_message}), 500
+
+
+
 
 if __name__ == '__main__':
     app.run()
